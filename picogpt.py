@@ -161,149 +161,152 @@ class PicoGPT(nn.Module):
 
 ######################################################################
 
-if not __name__ == "__main__":
-    exit(0)
+if __name__ == "__main__":
 
-import random
-
-######################################################################
-
-if torch.cuda.is_available():
-    device = torch.device("cuda")
-elif torch.backends.mps.is_available():
-    device = torch.device("mps")
-elif torch.xpu.is_available():
-    device = torch.device("xpu")
-else:
-    device = torch.device("cpu")
-
-######################################################################
-
-# This function should return a single sample. It has to be a string
-# of always the same length, with a ">" somwehere, always at the same
-# position. This one generate a random sequence of letters of length
-# 25 for the prompt and the same in reversed order to predict.
-
-
-def generate_data(nb, prompt_len=25):
-    l = [
-        "".join(
-            [random.choice("ABCDEFGHIJKLMNOPQRSTUVWXYZ") for _ in range(prompt_len)]
-        )
-        for _ in range(nb)
-    ]
-
-    return [x + ">" + x[::-1] for x in l]
-
-
-nb_train_samples, nb_test_samples = 10000, 1000
-
-######################################################################
-
-data = generate_data(nb_train_samples + nb_test_samples)
-
-prompt_lens = set([x.find(">") for x in data])
-
-assert len(prompt_lens) == 1
-
-prompt_len = next(iter(prompt_lens))
-
-assert prompt_len >= 0
-
-all_symbols = set("".join(data))
-char2token = dict([(c, n) for n, c in enumerate(all_symbols)])
-token2char = dict([(n, c) for n, c in enumerate(all_symbols)])
-voc_size = len(all_symbols)
-
-data = torch.cat([torch.tensor([char2token[c] for c in s])[None, :] for s in data])
-
-train_input, test_input = data[:nb_train_samples], data[nb_train_samples:]
-
-######################################################################
-# Model
-
-dim, nb_blocks, nb_heads = 128, 4, 4
-
-model = PicoGPT(
-    voc_size=voc_size,
-    dim_model=dim,
-    dim_keys=dim // nb_heads,
-    dim_hidden=dim,
-    nb_heads=nb_heads,
-    nb_blocks=nb_blocks,
-    causal=True,
-    dropout=0.1,
-)
-
-nb_epochs, batch_size = 11, 100
-
-optim = torch.optim.Adam(params=model.parameters(), lr=1e-3)
-
-train_input = train_input.to(device)
-test_input = test_input.to(device)
-model.to(device)
-
-nb_parameters = sum([p.numel() for p in model.parameters()])
-
-print(f"nb_parameters {nb_parameters} device {device}")
-
-######################################################################
-# Train / test
-
-for n_epoch in range(nb_epochs):
+    import random
 
     ######################################################################
-    # One training epoch
 
-    model.train()
-
-    acc_train_loss = 0.0
-
-    for input in train_input.split(batch_size):
-        loss = model.cross_entropy(input)
-        acc_train_loss += loss.item() * input.size(0)
-        optim.zero_grad()
-        loss.backward()
-        optim.step()
-
-    acc_train_loss = acc_train_loss / train_input.size(0)
+    if torch.cuda.is_available():
+        device = torch.device("cuda")
+    elif torch.backends.mps.is_available():
+        device = torch.device("mps")
+    elif torch.xpu.is_available():
+        device = torch.device("xpu")
+    else:
+        device = torch.device("cpu")
 
     ######################################################################
-    # One test epoch to compute the test loss, and the token error
-    # rate on a few samples
 
-    model.eval()
+    # This function should return a single sample. It has to be a string
+    # of always the same length, with a ">" somwehere, always at the same
+    # position. This one generate a random sequence of letters of length
+    # 25 for the prompt and the same in reversed order to predict.
 
-    acc_test_loss = 0.0
+    def generate_data(nb, prompt_len=25):
+        l = [
+            "".join(
+                [random.choice("ABCDEFGHIJKLMNOPQRSTUVWXYZ") for _ in range(prompt_len)]
+            )
+            for _ in range(nb)
+        ]
 
-    for input in test_input.split(batch_size):
-        loss = model.cross_entropy(input)
-        acc_test_loss += loss.item() * input.size(0)
+        return [x + ">" + x[::-1] for x in l]
 
-    acc_test_loss = acc_test_loss / test_input.size(0)
+    nb_train_samples, nb_test_samples = 10000, 1000
 
-    input = test_input[:batch_size]
-    result = input.clone()
-    result[:, prompt_len:] = 0
-    model.inplace_ar(result, t_start=prompt_len)
+    ######################################################################
 
-    nb_errors = (input[:, prompt_len:] != result[:, prompt_len:]).long().sum().item()
-    error_rate = nb_errors / input[:, prompt_len:].numel()
+    data = generate_data(nb_train_samples + nb_test_samples)
 
-    print(
-        f"n_epoch {n_epoch} train_loss {acc_train_loss} test_loss {acc_test_loss} token_error {error_rate*100:.01f}%"
+    prompt_lens = set([x.find(">") for x in data])
+
+    assert len(prompt_lens) == 1
+
+    prompt_len = next(iter(prompt_lens))
+
+    assert prompt_len >= 0
+
+    all_symbols = set("".join(data))
+    char2token = dict([(c, n) for n, c in enumerate(all_symbols)])
+    token2char = dict([(n, c) for n, c in enumerate(all_symbols)])
+    voc_size = len(all_symbols)
+
+    data = torch.cat([torch.tensor([char2token[c] for c in s])[None, :] for s in data])
+
+    train_input, test_input = data[:nb_train_samples], data[nb_train_samples:]
+
+    ######################################################################
+    # Model
+
+    dim, nb_blocks, nb_heads = 128, 4, 4
+
+    model = PicoGPT(
+        voc_size=voc_size,
+        dim_model=dim,
+        dim_keys=dim // nb_heads,
+        dim_hidden=dim,
+        nb_heads=nb_heads,
+        nb_blocks=nb_blocks,
+        causal=True,
+        dropout=0.1,
     )
 
+    nb_epochs, batch_size = 11, 100
+
+    optim = torch.optim.Adam(params=model.parameters(), lr=1e-3)
+
+    train_input = train_input.to(device)
+    test_input = test_input.to(device)
+    model.to(device)
+
+    nb_parameters = sum([p.numel() for p in model.parameters()])
+
+    print(f"nb_parameters {nb_parameters} device {device}")
+
     ######################################################################
-    # Print the generated sequences on a few examples from time to
-    # time
+    # Train / test
 
-    if n_epoch % 10 == 0:
+    for n_epoch in range(nb_epochs):
 
-        print("----------------------------------------------------------------------")
+        ######################################################################
+        # One training epoch
 
-        for s, t in zip(input[:5], result):
-            print("true:      " + "".join([token2char[x.item()] for x in s]))
-            print("generated: " + "".join([token2char[x.item()] for x in t]))
+        model.train()
 
-        print("----------------------------------------------------------------------")
+        acc_train_loss = 0.0
+
+        for input in train_input.split(batch_size):
+            loss = model.cross_entropy(input)
+            acc_train_loss += loss.item() * input.size(0)
+            optim.zero_grad()
+            loss.backward()
+            optim.step()
+
+        acc_train_loss = acc_train_loss / train_input.size(0)
+
+        ######################################################################
+        # One test epoch to compute the test loss, and the token error
+        # rate on a few samples
+
+        model.eval()
+
+        acc_test_loss = 0.0
+
+        for input in test_input.split(batch_size):
+            loss = model.cross_entropy(input)
+            acc_test_loss += loss.item() * input.size(0)
+
+        acc_test_loss = acc_test_loss / test_input.size(0)
+
+        input = test_input[:batch_size]
+        result = input.clone()
+        result[:, prompt_len:] = 0
+        model.inplace_ar(result, t_start=prompt_len)
+
+        nb_errors = (
+            (input[:, prompt_len:] != result[:, prompt_len:]).long().sum().item()
+        )
+        error_rate = nb_errors / input[:, prompt_len:].numel()
+
+        print(
+            f"n_epoch {n_epoch} train_loss {acc_train_loss} test_loss {acc_test_loss} token_error {error_rate*100:.01f}%"
+        )
+
+        ######################################################################
+        # Print the generated sequences on a few examples from time to
+        # time
+
+        if n_epoch % 10 == 0:
+
+            print(
+                "----------------------------------------------------------------------"
+            )
+
+            for s, t in zip(input[:5], result):
+                print("true:      " + "".join([token2char[x.item()] for x in s]))
+                print("generated: " + "".join([token2char[x.item()] for x in t]))
+
+            print(
+                "----------------------------------------------------------------------"
+            )

@@ -15,6 +15,10 @@ import torch
 from torch import nn
 from torch.nn import functional as F
 
+import json
+from pathlib import Path
+import numpy as np
+
 ######################################################################
 
 
@@ -176,6 +180,28 @@ if __name__ == "__main__":
     else:
         device = torch.device("cpu")
 
+    # Create visualization directory
+    viz_dir = Path(".picogpt_viz")
+    viz_dir.mkdir(exist_ok=True)
+    state_file = viz_dir / "model_state.json"
+    embeddings_file = viz_dir / "embeddings.npy"
+    attention_file = viz_dir / "attention.npy"
+
+    def save_model_state(sample, loss, epoch, embeddings=None, attention=None):
+        """Save current model state for visualization"""
+        state = {
+            'current_sample': sample,
+            'loss': loss,
+            'epoch': epoch
+        }
+        with open(state_file, 'w') as f:
+            json.dump(state, f)
+        
+        if embeddings is not None:
+            np.save(embeddings_file, embeddings.cpu().numpy())
+        if attention is not None:
+            np.save(attention_file, attention.cpu().numpy())
+
     ######################################################################
 
     # This function should return a single sample. It has to be a string
@@ -247,66 +273,84 @@ if __name__ == "__main__":
     ######################################################################
     # Train / test
 
-    for n_epoch in range(nb_epochs):
+    try:
+        for n_epoch in range(nb_epochs):
+            ######################################################################
+            # One training epoch
 
-        ######################################################################
-        # One training epoch
+            model.train()
+            acc_train_loss = 0.0
 
-        model.train()
+            for batch_idx, input in enumerate(train_input.split(batch_size)):
+                loss = model.cross_entropy(input)
+                acc_train_loss += loss.item() * input.size(0)
+                optim.zero_grad()
+                loss.backward()
+                optim.step()
 
-        acc_train_loss = 0.0
+                # Save state for visualization every 10 batches
+                if batch_idx % 10 == 0:
+                    with torch.no_grad():
+                        # Get sample text
+                        sample = "".join([token2char[x.item()] for x in input[0]])
+                        
+                        # Get embeddings
+                        x = F.pad(input[0:1], (1, -1))
+                        embeddings = model.starter[0](x)
+                        
+                        # Get attention from first layer
+                        x = model.starter(x)
+                        x = model.trunk[0].att_ln(x)
+                        q = torch.einsum("ntc,hdc->nhtd", x, model.trunk[0].att_mh.w_q)
+                        k = torch.einsum("ntc,hdc->nhtd", x, model.trunk[0].att_mh.w_k)
+                        attention = torch.einsum("nhtd,nhsd->nhts", q, k) / np.sqrt(q.size(-1))
+                        
+                        if model.trunk[0].att_mh.causal:
+                            t = torch.arange(x.size(1), device=device)
+                            mask = t[:, None] < t[None, :]
+                            attention = attention.masked_fill(mask[None, None, :, :], float('-inf'))
+                        
+                        attention = torch.softmax(attention, dim=-1)
+                        attention = attention.mean(dim=1).squeeze(0)
+                        
+                        save_model_state(sample, loss.item(), n_epoch, embeddings[0], attention)
 
-        for input in train_input.split(batch_size):
-            loss = model.cross_entropy(input)
-            acc_train_loss += loss.item() * input.size(0)
-            optim.zero_grad()
-            loss.backward()
-            optim.step()
+            acc_train_loss = acc_train_loss / train_input.size(0)
 
-        acc_train_loss = acc_train_loss / train_input.size(0)
+            ######################################################################
+            # One test epoch
 
-        ######################################################################
-        # One test epoch to compute the test loss, and the token error
-        # rate on a few samples
+            model.eval()
+            acc_test_loss = 0.0
 
-        model.eval()
+            for input in test_input.split(batch_size):
+                loss = model.cross_entropy(input)
+                acc_test_loss += loss.item() * input.size(0)
 
-        acc_test_loss = 0.0
+            acc_test_loss = acc_test_loss / test_input.size(0)
 
-        for input in test_input.split(batch_size):
-            loss = model.cross_entropy(input)
-            acc_test_loss += loss.item() * input.size(0)
+            input = test_input[:batch_size]
+            result = input.clone()
+            result[:, prompt_len:] = 0
+            model.inplace_ar(result, t_start=prompt_len)
 
-        acc_test_loss = acc_test_loss / test_input.size(0)
-
-        input = test_input[:batch_size]
-        result = input.clone()
-        result[:, prompt_len:] = 0
-        model.inplace_ar(result, t_start=prompt_len)
-
-        nb_errors = (
-            (input[:, prompt_len:] != result[:, prompt_len:]).long().sum().item()
-        )
-        error_rate = nb_errors / input[:, prompt_len:].numel()
-
-        print(
-            f"n_epoch {n_epoch} train_loss {acc_train_loss} test_loss {acc_test_loss} token_error {error_rate*100:.01f}%"
-        )
-
-        ######################################################################
-        # Print the generated sequences on a few examples from time to
-        # time
-
-        if n_epoch % 10 == 0:
+            nb_errors = (input[:, prompt_len:] != result[:, prompt_len:]).long().sum().item()
+            error_rate = nb_errors / input[:, prompt_len:].numel()
 
             print(
-                "----------------------------------------------------------------------"
+                f"n_epoch {n_epoch} train_loss {acc_train_loss} test_loss {acc_test_loss} token_error {error_rate*100:.01f}%"
             )
 
-            for s, t in zip(input[:5], result):
-                print("true:      " + "".join([token2char[x.item()] for x in s]))
-                print("generated: " + "".join([token2char[x.item()] for x in t]))
+            if n_epoch % 10 == 0:
+                print("----------------------------------------------------------------------")
+                for s, t in zip(input[:5], result):
+                    print("true:      " + "".join([token2char[x.item()] for x in s]))
+                    print("generated: " + "".join([token2char[x.item()] for x in t]))
+                print("----------------------------------------------------------------------")
 
-            print(
-                "----------------------------------------------------------------------"
-            )
+    finally:
+        # Cleanup visualization files
+        if viz_dir.exists():
+            for file in viz_dir.glob("*"):
+                file.unlink()
+            viz_dir.rmdir()
